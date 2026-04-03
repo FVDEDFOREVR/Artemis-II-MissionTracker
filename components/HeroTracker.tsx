@@ -305,10 +305,28 @@ function drawOrion(
   geometry: MissionGeometry,
   progress: number,
   officialPoint?: Point | null,
+  animationMs = 0,
 ) {
   const point = officialPoint ?? getPointOnMissionCurve(progress, geometry);
   const direction = point.x > geometry.width * 0.74 ? -1 : 1;
   const leaderEnd = point.x + direction * 46;
+  const pulseCycle = (animationMs % 1800) / 1800;
+  const secondaryPulseCycle = ((animationMs + 900) % 1800) / 1800;
+  const pulseRadius = 10 + pulseCycle * 7;
+  const secondaryPulseRadius = 10 + secondaryPulseCycle * 7;
+  const coreScale = 1 + Math.sin(animationMs / 240) * 0.08;
+
+  context.beginPath();
+  context.strokeStyle = `rgba(248,244,235,${0.28 * (1 - pulseCycle)})`;
+  context.lineWidth = 1;
+  context.arc(point.x, point.y, pulseRadius, 0, Math.PI * 2);
+  context.stroke();
+
+  context.beginPath();
+  context.strokeStyle = `rgba(232,228,216,${0.12 * (1 - secondaryPulseCycle)})`;
+  context.lineWidth = 0.75;
+  context.arc(point.x, point.y, secondaryPulseRadius, 0, Math.PI * 2);
+  context.stroke();
 
   context.beginPath();
   context.fillStyle = "rgba(232,228,216,0.18)";
@@ -322,7 +340,7 @@ function drawOrion(
 
   context.beginPath();
   context.fillStyle = "#C0392B";
-  context.arc(point.x, point.y, 2.75, 0, Math.PI * 2);
+  context.arc(point.x, point.y, 2.75 * coreScale, 0, Math.PI * 2);
   context.fill();
 
   context.strokeStyle = "rgba(250,248,242,1)";
@@ -349,6 +367,7 @@ function drawScene(
   traveledPath?: Point[],
   officialPoint?: Point | null,
   milestonePoints?: Partial<Record<(typeof HERO_MILESTONES)[number]["key"], Point | null>>,
+  animationMs = 0,
 ) {
   context.clearRect(0, 0, geometry.width, geometry.height);
   context.fillStyle = PITCH_BLACK;
@@ -362,7 +381,7 @@ function drawScene(
     drawEarth(context, geometry, earthImage);
     drawMoon(context, geometry, moonImage);
   }
-  drawOrion(context, geometry, progress, officialPoint);
+  drawOrion(context, geometry, progress, officialPoint, animationMs);
 }
 
 export default function HeroTracker({
@@ -562,6 +581,7 @@ export default function HeroTracker({
         traveledPath,
         officialPoint,
         milestonePoints,
+        now,
       );
       animationFrameId = window.requestAnimationFrame(render);
     };
