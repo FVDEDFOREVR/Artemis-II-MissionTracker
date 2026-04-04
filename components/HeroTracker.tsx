@@ -10,13 +10,15 @@ import {
   MissionGeometry,
   MissionTelemetry,
   Point,
-  getMissionMilestonePoint,
   getMissionPathPoints,
   getMissionPointAtTime,
   getMissionSnapshot,
   getMissionTelemetry,
   getMissionTraveledPathPoints,
+  getOrbitMilestonePoint,
   getPointOnMissionCurve,
+  getTrajectoryPathMilestones,
+  getTrajectoryPathProgress,
   loadMissionEphemeris,
   getTrajectoryGeometry,
   sampleMissionCurve,
@@ -64,26 +66,49 @@ const PROGRESS_LABELS: Record<
   splashdown: { full: "Splashdown", short: "Splash" },
 };
 
+function getTimelineLabelLayout(
+  key: string,
+  mobile: boolean,
+): { anchor: "outsideStart" | "middle" | "outsideEnd"; offset: number; top: number } {
+  if (mobile) {
+    switch (key) {
+      case "tli":
+        return { anchor: "outsideStart", offset: -6, top: 46 };
+      case "flyby":
+        return { anchor: "middle", offset: 0, top: 46 };
+      case "reentry":
+        return { anchor: "middle", offset: 0, top: 46 };
+      case "splashdown":
+        return { anchor: "outsideEnd", offset: 8, top: 46 };
+      default:
+        return { anchor: "middle", offset: 0, top: 46 };
+    }
+  }
+
+  switch (key) {
+    case "tli":
+      return { anchor: "outsideStart", offset: -8, top: 40 };
+    case "flyby":
+      return { anchor: "middle", offset: 0, top: 40 };
+    case "reentry":
+      return { anchor: "middle", offset: 0, top: 40 };
+    case "splashdown":
+      return { anchor: "outsideEnd", offset: 10, top: 40 };
+    default:
+      return { anchor: "middle", offset: 0, top: 40 };
+  }
+}
+
 const DESKTOP_PROGRESS = {
   wrapper: { x: 424, y: 748, width: 614, height: 50 },
   percentRight: 555,
   rail: { x: 36, y: 30, width: 520 },
   dotOffsetY: 26.5,
-  ticks: {
-    launch: { x: 36, y: 26, height: 4 },
-    tli: { x: 95.8, y: 26, height: 4 },
-    flyby: { x: 296, y: 26, height: 4 },
-    reentry: { x: 493.6, y: 26, height: 4 },
-    splashdown: { x: 556, y: 26, height: 5 },
-  },
-  labels: {
-    launch: { x: 0, y: 23 },
-    tli: { x: 87.8, y: 40 },
-    flyby: { x: 267.5, y: 40 },
-    reentry: { x: 475.6, y: 40 },
-    splashdown: { x: 562, y: 23 },
-  },
 } as const;
+
+function formatMissionProgressPercent(progress: number) {
+  return `${(progress * 100).toFixed(3)}%`;
+}
 
 function loadCanvasImage(source: string) {
   return new Promise<HTMLImageElement>((resolve, reject) => {
@@ -282,14 +307,14 @@ function drawTrajectory(
 function drawMilestones(
   context: CanvasRenderingContext2D,
   geometry: MissionGeometry,
-  progress: number,
+  nowMs: number,
   milestonePoints?: Partial<Record<(typeof HERO_MILESTONES)[number]["key"], Point | null>>,
 ) {
   HERO_MILESTONES.forEach((milestone) => {
     const point =
       milestonePoints?.[milestone.key] ??
       getPointOnMissionCurve(milestone.progress, geometry);
-    const isPast = progress >= milestone.progress;
+    const isPast = nowMs >= milestone.timeMs;
 
     context.beginPath();
     context.fillStyle = isPast
@@ -361,6 +386,7 @@ function drawScene(
   context: CanvasRenderingContext2D,
   geometry: MissionGeometry,
   progress: number,
+  nowMs: number,
   earthImage: HTMLImageElement | null,
   moonImage: HTMLImageElement | null,
   fullPath?: Point[],
@@ -376,7 +402,7 @@ function drawScene(
 
   drawStars(context, geometry.width, geometry.height);
   drawTrajectory(context, geometry, progress, fullPath, traveledPath);
-  drawMilestones(context, geometry, progress, milestonePoints);
+  drawMilestones(context, geometry, nowMs, milestonePoints);
   if (bodiesReady) {
     drawEarth(context, geometry, earthImage);
     drawMoon(context, geometry, moonImage);
@@ -389,11 +415,15 @@ export default function HeroTracker({
   initialDataSource,
   initialSnapshot,
   initialTelemetry,
+  initialTimelineProgress,
+  initialTimelineMilestones,
 }: {
   initialNowMs: number;
   initialDataSource: string | null;
   initialSnapshot: ReturnType<typeof getMissionSnapshot>;
   initialTelemetry: MissionTelemetry;
+  initialTimelineProgress: number;
+  initialTimelineMilestones: ReturnType<typeof getTrajectoryPathMilestones>;
 }) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const earthImageRef = useRef<HTMLImageElement | null>(null);
@@ -515,10 +545,10 @@ export default function HeroTracker({
     const milestonePoints = Object.fromEntries(
       HERO_MILESTONES.map((milestone) => [
         milestone.key,
-        getMissionMilestonePoint(
+        getOrbitMilestonePoint(
           viewport.width,
           viewport.height,
-          milestone.key === "flyby" && ephemeris ? ephemeris.flybyTimeMs : milestone.timeMs,
+          milestone.key,
           ephemeris,
         ),
       ]),
@@ -527,7 +557,17 @@ export default function HeroTracker({
     const render = () => {
       const geometry = getTrajectoryGeometry(viewport.width, viewport.height, ephemeris);
       const now = Date.now();
-      const progress = getMissionSnapshot(now, ephemeris).progress;
+      const liveSnapshot = getMissionSnapshot(now, ephemeris);
+      const progress = liveSnapshot.progress;
+      const timelineProgress =
+        ephemeris === undefined
+          ? initialTimelineProgress
+          : getTrajectoryPathProgress(
+              now,
+              viewport.width,
+              viewport.height,
+              ephemeris,
+            );
       const traveledPath = getMissionTraveledPathPoints(
         now,
         viewport.width,
@@ -553,14 +593,20 @@ export default function HeroTracker({
           direction > 0 ? "translateX(0)" : "translateX(-100%)";
       }
 
-      const progressText = `${Math.round(progress * 100)}%`;
+      const progressText = formatMissionProgressPercent(timelineProgress);
 
       if (mobileProgressRef.current) {
-        mobileProgressRef.current.style.setProperty("--mission-progress", String(progress));
+        mobileProgressRef.current.style.setProperty(
+          "--mission-progress",
+          String(timelineProgress),
+        );
       }
 
       if (desktopProgressRef.current) {
-        desktopProgressRef.current.style.setProperty("--mission-progress", String(progress));
+        desktopProgressRef.current.style.setProperty(
+          "--mission-progress",
+          String(timelineProgress),
+        );
       }
 
       if (mobileProgressPercentRef.current) {
@@ -575,6 +621,7 @@ export default function HeroTracker({
         context,
         geometry,
         progress,
+        now,
         earthImageRef.current,
         moonImageRef.current,
         fullPath,
@@ -602,10 +649,27 @@ export default function HeroTracker({
     ephemeris === undefined
       ? initialTelemetry
       : getMissionTelemetry(nowMs, resolvedEphemeris);
-  const progressPercent = snapshot.progress * 100;
+  const timelineProgress =
+    ephemeris === undefined
+      ? initialTimelineProgress
+      : getTrajectoryPathProgress(
+          nowMs,
+          viewport.width,
+          viewport.height,
+          resolvedEphemeris,
+        );
+  const progressText = formatMissionProgressPercent(timelineProgress);
   const mobile = viewport.width < 768;
   const dataSourceLabel =
     resolvedEphemeris?.source ?? initialDataSource ?? "NASA Artemis II published state vectors";
+  const timelineMilestones =
+    ephemeris === undefined
+      ? initialTimelineMilestones
+      : getTrajectoryPathMilestones(
+          viewport.width,
+          viewport.height,
+          resolvedEphemeris,
+        );
   const overlayGeometry = getTrajectoryGeometry(
     viewport.width,
     viewport.height,
@@ -625,20 +689,91 @@ export default function HeroTracker({
   const sceneOffsetX = (viewport.width - REFERENCE_WIDTH * sceneScale) / 2;
   const sceneOffsetY = (viewport.height - REFERENCE_HEIGHT * sceneScale) / 2;
   const mobileTimelineRailInset = 38;
-  const getMobileTimelinePosition = (
+  const getDesktopTimelinePosition = (
     progress: number,
     anchor: "start" | "middle" | "end" = "middle",
+    offset = 0,
   ) => {
     if (anchor === "start") {
-      return { left: `${mobileTimelineRailInset}px` };
+      return { left: DESKTOP_PROGRESS.rail.x + offset };
     }
 
     if (anchor === "end") {
-      return { left: `calc(100% - ${mobileTimelineRailInset}px)`, transform: "translateX(-100%)" };
+      return {
+        left: DESKTOP_PROGRESS.rail.x + DESKTOP_PROGRESS.rail.width + offset,
+        transform: "translateX(-100%)",
+      };
     }
 
     return {
-      left: `calc(${mobileTimelineRailInset}px + (100% - ${mobileTimelineRailInset * 2}px) * ${progress})`,
+      left: DESKTOP_PROGRESS.rail.x + DESKTOP_PROGRESS.rail.width * progress + offset,
+      transform: "translateX(-50%)",
+    };
+  };
+  const getDesktopTimelineLabelPosition = (
+    progress: number,
+    anchor: "outsideStart" | "middle" | "outsideEnd" = "middle",
+    offset = 0,
+  ) => {
+    if (anchor === "outsideStart") {
+      return {
+        left: DESKTOP_PROGRESS.rail.x + offset,
+        transform: "translateX(-100%)",
+      };
+    }
+
+    if (anchor === "outsideEnd") {
+      return {
+        left: DESKTOP_PROGRESS.rail.x + DESKTOP_PROGRESS.rail.width + offset,
+      };
+    }
+
+    return {
+      left: DESKTOP_PROGRESS.rail.x + DESKTOP_PROGRESS.rail.width * progress + offset,
+      transform: "translateX(-50%)",
+    };
+  };
+  const getMobileTimelinePosition = (
+    progress: number,
+    anchor: "start" | "middle" | "end" = "middle",
+    offset = 0,
+  ) => {
+    if (anchor === "start") {
+      return { left: `calc(${mobileTimelineRailInset}px + ${offset}px)` };
+    }
+
+    if (anchor === "end") {
+      return {
+        left: `calc(100% - ${mobileTimelineRailInset}px + ${offset}px)`,
+        transform: "translateX(-100%)",
+      };
+    }
+
+    return {
+      left: `calc(${mobileTimelineRailInset}px + (100% - ${mobileTimelineRailInset * 2}px) * ${progress} + ${offset}px)`,
+      transform: "translateX(-50%)",
+    };
+  };
+  const getMobileTimelineLabelPosition = (
+    progress: number,
+    anchor: "outsideStart" | "middle" | "outsideEnd" = "middle",
+    offset = 0,
+  ) => {
+    if (anchor === "outsideStart") {
+      return {
+        left: `calc(${mobileTimelineRailInset}px + ${offset}px)`,
+        transform: "translateX(-100%)",
+      };
+    }
+
+    if (anchor === "outsideEnd") {
+      return {
+        left: `calc(100% - ${mobileTimelineRailInset}px + ${offset}px)`,
+      };
+    }
+
+    return {
+      left: `calc(${mobileTimelineRailInset}px + (100% - ${mobileTimelineRailInset * 2}px) * ${progress} + ${offset}px)`,
       transform: "translateX(-50%)",
     };
   };
@@ -812,19 +947,19 @@ export default function HeroTracker({
                   className="relative h-[72px]"
                   style={
                     {
-                      "--mission-progress": String(snapshot.progress),
+                      "--mission-progress": String(timelineProgress),
                     } as React.CSSProperties
                   }
                 >
                   <span className="absolute left-0 top-0 text-[10px] font-normal tracking-[1.6px] text-muted">
-                    MISSION PROGRESS
+                    TRAJECTORY PROGRESS
                   </span>
                   <span
                     ref={mobileProgressPercentRef}
                     className="absolute right-0 top-0 text-right text-[10px] font-normal tracking-[1px] text-muted"
                     suppressHydrationWarning
                   >
-                    {Math.round(progressPercent)}%
+                    {progressText}
                   </span>
 
                   <div
@@ -851,12 +986,13 @@ export default function HeroTracker({
                     }}
                   />
 
-                  {HERO_MILESTONES.map((milestone) => {
-                    const tone =
-                      snapshot.progress >= milestone.progress ? "#b4b2a8" : "#646258";
-                    const tickOpacity = snapshot.progress >= milestone.progress ? 0.5 : 0.18;
-                    const anchor =
-                      milestone.key === "launch"
+                  {timelineMilestones.map((milestone) => {
+                    const isPast = nowMs >= milestone.timeMs;
+                    const tone = isPast ? "#b4b2a8" : "#646258";
+                    const tickOpacity = isPast ? 0.5 : 0.18;
+                    const layout = getTimelineLabelLayout(milestone.key, true);
+                    const tickAnchor =
+                      milestone.key === "tli"
                         ? "start"
                         : milestone.key === "splashdown"
                           ? "end"
@@ -867,24 +1003,25 @@ export default function HeroTracker({
                         <span
                           className="absolute block w-[0.5px] bg-[rgba(200,198,188,1)]"
                           style={{
-                            ...getMobileTimelinePosition(milestone.progress, anchor),
+                            ...getMobileTimelinePosition(milestone.progress, tickAnchor),
                             top: 24,
                             height: milestone.key === "splashdown" ? 5 : 4,
                             opacity: tickOpacity,
                           }}
                         />
                         <span
-                          className="absolute whitespace-nowrap text-[8px] font-light leading-none tracking-[0.4px]"
+                          className="absolute whitespace-nowrap text-[8px] font-medium leading-none tracking-[0.4px]"
                           style={{
-                            ...getMobileTimelinePosition(milestone.progress, anchor),
-                            top:
-                              milestone.key === "launch" || milestone.key === "splashdown"
-                                ? 19
-                                : 46,
+                            ...getMobileTimelineLabelPosition(
+                              milestone.progress,
+                              layout.anchor,
+                              layout.offset,
+                            ),
+                            top: layout.top,
                             color: tone,
                           }}
                         >
-                          {PROGRESS_LABELS[milestone.key].full}
+                          {PROGRESS_LABELS[milestone.key].short}
                         </span>
                       </div>
                     );
@@ -909,11 +1046,11 @@ export default function HeroTracker({
                     height: DESKTOP_PROGRESS.wrapper.height,
                     transform: `scale(${sceneScale})`,
                     transformOrigin: "top left",
-                    ["--mission-progress" as string]: String(snapshot.progress),
+                    ["--mission-progress" as string]: String(timelineProgress),
                   }}
                 >
                   <span className="absolute left-0 top-0 text-[9px] font-normal tracking-[1.6px] text-muted">
-                    MISSION PROGRESS
+                    TRAJECTORY PROGRESS
                   </span>
                   <span
                     ref={desktopProgressPercentRef}
@@ -921,7 +1058,7 @@ export default function HeroTracker({
                     style={{ left: DESKTOP_PROGRESS.percentRight }}
                     suppressHydrationWarning
                   >
-                    {Math.round(progressPercent)}%
+                    {progressText}
                   </span>
 
                   <div
@@ -948,29 +1085,38 @@ export default function HeroTracker({
                     }}
                   />
 
-                  {HERO_MILESTONES.map((milestone) => {
-                    const tick = DESKTOP_PROGRESS.ticks[milestone.key];
-                    const label = DESKTOP_PROGRESS.labels[milestone.key];
-                    const tone =
-                      snapshot.progress >= milestone.progress ? "#b4b2a8" : "#646258";
-                    const tickOpacity = snapshot.progress >= milestone.progress ? 0.5 : 0.18;
+                  {timelineMilestones.map((milestone) => {
+                    const isPast = nowMs >= milestone.timeMs;
+                    const tone = isPast ? "#b4b2a8" : "#646258";
+                    const tickOpacity = isPast ? 0.5 : 0.18;
+                    const layout = getTimelineLabelLayout(milestone.key, false);
+                    const tickAnchor =
+                      milestone.key === "tli"
+                        ? "start"
+                        : milestone.key === "splashdown"
+                          ? "end"
+                          : "middle";
 
                     return (
                       <div key={milestone.key}>
                         <span
                           className="absolute block w-[0.5px] bg-[rgba(200,198,188,1)]"
                           style={{
-                            left: tick.x,
-                            top: tick.y,
-                            height: tick.height,
+                            ...getDesktopTimelinePosition(milestone.progress, tickAnchor),
+                            top: 26,
+                            height: milestone.key === "splashdown" ? 5 : 4,
                             opacity: tickOpacity,
                           }}
                         />
                         <span
-                          className="absolute whitespace-nowrap text-[8px] font-light leading-none tracking-[0.4px]"
+                          className="absolute whitespace-nowrap text-[8px] font-medium leading-none tracking-[0.4px]"
                           style={{
-                            left: label.x,
-                            top: label.y,
+                            ...getDesktopTimelineLabelPosition(
+                              milestone.progress,
+                              layout.anchor,
+                              layout.offset,
+                            ),
+                            top: layout.top,
                             color: tone,
                           }}
                         >
