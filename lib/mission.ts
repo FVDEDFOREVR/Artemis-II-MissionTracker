@@ -9,6 +9,9 @@ const DAY_MS = 24 * HOUR_MS;
 const PEAK_DISTANCE_MILES = 252_000;
 const MILES_PER_KM = 0.621371;
 const MPH_PER_KM_PER_SECOND = 2236.9362920544;
+const RETURN_EVENT_FALLBACK_ALTITUDE_MILES = 5_000;
+const REENTRY_MARKER_ALTITUDE_MILES = 5_000;
+const SPLASHDOWN_MARKER_ALTITUDE_MILES = 100;
 
 const LAUNCH_MS = LAUNCH.getTime();
 const TLI_MS = TLI.getTime();
@@ -280,6 +283,21 @@ const physicalSceneLayoutCache = new WeakMap<
   MissionEphemeris,
   Map<string, PhysicalSceneLayout>
 >();
+type ProjectedTrajectoryPathSample = {
+  timestampMs: number;
+  point: Point;
+};
+
+type ProjectedTrajectoryPath = {
+  samples: ProjectedTrajectoryPathSample[];
+  cumulativeLengths: number[];
+  totalLength: number;
+};
+
+const projectedTrajectoryPathCache = new WeakMap<
+  MissionEphemeris,
+  Map<string, ProjectedTrajectoryPath>
+>();
 
 export function clamp(value: number, min: number, max: number) {
   return Math.min(max, Math.max(min, value));
@@ -383,6 +401,231 @@ export async function loadMissionEphemeris(
 
 export function getMissionProgress(nowMs: number) {
   return clamp((nowMs - LAUNCH_MS) / (SPLASHDOWN_MS - LAUNCH_MS), 0, 1);
+}
+
+function getDisplayTrajectoryEndTimeMs(ephemeris?: MissionEphemeris | null) {
+  if (!ephemeris) {
+    return SPLASHDOWN_MS;
+  }
+
+  return Math.min(ephemeris.stopTimeMs, SPLASHDOWN_MS);
+}
+
+export function getTrajectoryProgress(
+  nowMs: number,
+  ephemeris?: MissionEphemeris | null,
+) {
+  const startTimeMs = getDisplayTrajectoryStartTimeMs(ephemeris);
+  const endTimeMs = getDisplayTrajectoryEndTimeMs(ephemeris);
+
+  if (endTimeMs <= startTimeMs) {
+    return 0;
+  }
+
+  return clamp((nowMs - startTimeMs) / (endTimeMs - startTimeMs), 0, 1);
+}
+
+export function getTrajectoryTimelineMilestones(
+  ephemeris?: MissionEphemeris | null,
+) {
+  return HERO_MILESTONES.filter((milestone) => milestone.key !== "launch").map((milestone) => ({
+    ...milestone,
+    progress: getTrajectoryProgress(milestone.timeMs, ephemeris),
+  }));
+}
+
+function buildProjectedTrajectoryPath(
+  width: number,
+  height: number,
+  ephemeris: MissionEphemeris,
+): ProjectedTrajectoryPath {
+  const startTimeMs = getDisplayTrajectoryStartTimeMs(ephemeris);
+  const endTimeMs = getDisplayTrajectoryEndTimeMs(ephemeris);
+  const startState = getMissionEphemerisState(startTimeMs, ephemeris);
+  const endState = getMissionEphemerisState(endTimeMs, ephemeris);
+
+  if (!startState || !endState) {
+    return {
+      samples: [],
+      cumulativeLengths: [],
+      totalLength: 0,
+    };
+  }
+
+  const samples: ProjectedTrajectoryPathSample[] = [
+    {
+      timestampMs: startTimeMs,
+      point: transformProjectedPoint(startState.referencePoint, width, height, ephemeris),
+    },
+  ];
+
+  for (const sample of ephemeris.samples) {
+    if (sample.timestampMs <= startTimeMs || sample.timestampMs >= endTimeMs) {
+      continue;
+    }
+
+    samples.push({
+      timestampMs: sample.timestampMs,
+      point: transformProjectedPoint(
+        { x: sample.sceneX, y: sample.sceneY },
+        width,
+        height,
+        ephemeris,
+      ),
+    });
+  }
+
+  samples.push({
+    timestampMs: endTimeMs,
+    point: transformProjectedPoint(endState.referencePoint, width, height, ephemeris),
+  });
+
+  const cumulativeLengths = [0];
+
+  for (let index = 1; index < samples.length; index += 1) {
+    const previousPoint = samples[index - 1].point;
+    const currentPoint = samples[index].point;
+    cumulativeLengths.push(
+      cumulativeLengths[index - 1] +
+        Math.hypot(
+          currentPoint.x - previousPoint.x,
+          currentPoint.y - previousPoint.y,
+        ),
+    );
+  }
+
+  return {
+    samples,
+    cumulativeLengths,
+    totalLength: cumulativeLengths[cumulativeLengths.length - 1] ?? 0,
+  };
+}
+
+function getProjectedTrajectoryPath(
+  width: number,
+  height: number,
+  ephemeris?: MissionEphemeris | null,
+) {
+  if (!ephemeris || ephemeris.samples.length === 0) {
+    return null;
+  }
+
+  const cacheKey = `${width}x${height}`;
+  const cachedPath = projectedTrajectoryPathCache.get(ephemeris)?.get(cacheKey);
+  if (cachedPath) {
+    return cachedPath;
+  }
+
+  const path = buildProjectedTrajectoryPath(width, height, ephemeris);
+
+  if (!projectedTrajectoryPathCache.has(ephemeris)) {
+    projectedTrajectoryPathCache.set(ephemeris, new Map());
+  }
+
+  projectedTrajectoryPathCache.get(ephemeris)!.set(cacheKey, path);
+  return path;
+}
+
+function getProjectedTrajectoryLengthAtTime(
+  nowMs: number,
+  width: number,
+  height: number,
+  ephemeris?: MissionEphemeris | null,
+) {
+  const path = getProjectedTrajectoryPath(width, height, ephemeris);
+  if (!path || path.samples.length === 0 || !ephemeris) {
+    return null;
+  }
+
+  const startTimeMs = path.samples[0].timestampMs;
+  const endTimeMs = path.samples[path.samples.length - 1].timestampMs;
+  const clampedNowMs = clamp(nowMs, startTimeMs, endTimeMs);
+  const segmentIndex = getSampleIndexAtTime(path.samples, clampedNowMs);
+  const baseLength = path.cumulativeLengths[segmentIndex] ?? 0;
+  const currentPoint = getMissionPointAtTime(clampedNowMs, width, height, ephemeris);
+  const previousSample = path.samples[segmentIndex];
+
+  if (!currentPoint || !previousSample || previousSample.timestampMs === clampedNowMs) {
+    return baseLength;
+  }
+
+  return clamp(
+    baseLength +
+      Math.hypot(
+        currentPoint.x - previousSample.point.x,
+        currentPoint.y - previousSample.point.y,
+      ),
+    0,
+    path.totalLength,
+  );
+}
+
+export function getTrajectoryPathProgress(
+  nowMs: number,
+  width: number,
+  height: number,
+  ephemeris?: MissionEphemeris | null,
+) {
+  const path = getProjectedTrajectoryPath(width, height, ephemeris);
+  const pathLength = getProjectedTrajectoryLengthAtTime(nowMs, width, height, ephemeris);
+
+  if (!path || path.totalLength <= 0 || pathLength === null) {
+    return getTrajectoryProgress(nowMs, ephemeris);
+  }
+
+  return clamp(pathLength / path.totalLength, 0, 1);
+}
+
+export function getTrajectoryPathMilestones(
+  width: number,
+  height: number,
+  ephemeris?: MissionEphemeris | null,
+) {
+  return HERO_MILESTONES.filter((milestone) => milestone.key !== "launch").map((milestone) => ({
+    ...milestone,
+    progress:
+      milestone.key === "reentry" &&
+      getMissionEphemerisState(milestone.timeMs, ephemeris)?.altitudeMiles !== null &&
+      (getMissionEphemerisState(milestone.timeMs, ephemeris)?.altitudeMiles ?? 0) >
+        RETURN_EVENT_FALLBACK_ALTITUDE_MILES
+        ? milestone.progress
+        : getTrajectoryPathProgress(milestone.timeMs, width, height, ephemeris),
+  }));
+}
+
+export function getTrajectoryPathPointAtProgress(
+  progress: number,
+  width: number,
+  height: number,
+  ephemeris?: MissionEphemeris | null,
+) {
+  const path = getProjectedTrajectoryPath(width, height, ephemeris);
+  if (!path || path.samples.length === 0 || path.totalLength <= 0) {
+    return null;
+  }
+
+  const clampedProgress = clamp(progress, 0, 1);
+  const targetLength = path.totalLength * clampedProgress;
+
+  for (let index = 1; index < path.samples.length; index += 1) {
+    const previousLength = path.cumulativeLengths[index - 1];
+    const currentLength = path.cumulativeLengths[index];
+
+    if (targetLength <= currentLength || index === path.samples.length - 1) {
+      const startPoint = path.samples[index - 1].point;
+      const endPoint = path.samples[index].point;
+      const segmentLength = currentLength - previousLength;
+      const localT =
+        segmentLength <= 0 ? 0 : clamp((targetLength - previousLength) / segmentLength, 0, 1);
+
+      return {
+        x: startPoint.x + (endPoint.x - startPoint.x) * localT,
+        y: startPoint.y + (endPoint.y - startPoint.y) * localT,
+      };
+    }
+  }
+
+  return path.samples[path.samples.length - 1].point;
 }
 
 export function getDistanceFromEarth(progress: number) {
@@ -512,11 +755,13 @@ export function getMissionSnapshot(
   ephemeris?: MissionEphemeris | null,
 ) {
   const progress = getMissionProgress(nowMs);
+  const trajectoryProgress = getTrajectoryProgress(nowMs, ephemeris);
   const phase = getMissionPhase(progress, nowMs);
   const distance = getDistanceFromEarthAtTime(nowMs, ephemeris);
 
   return {
     progress,
+    trajectoryProgress,
     phase,
     distance,
     distanceLabel: formatMilesFromEarth(distance, {
@@ -1225,6 +1470,107 @@ export function getMissionMilestonePoint(
   }
 
   return null;
+}
+
+function findFirstReturnSampleAtOrBelowAltitude(
+  altitudeMiles: number,
+  ephemeris?: MissionEphemeris | null,
+) {
+  if (!ephemeris) {
+    return null;
+  }
+
+  for (const sample of ephemeris.samples) {
+    if (sample.timestampMs < ephemeris.flybyTimeMs) {
+      continue;
+    }
+
+    const state = getMissionEphemerisState(sample.timestampMs, ephemeris);
+    if (state && state.altitudeMiles <= altitudeMiles) {
+      return sample.timestampMs;
+    }
+  }
+
+  return null;
+}
+
+function findClosestReturnSampleTimeMs(ephemeris?: MissionEphemeris | null) {
+  if (!ephemeris) {
+    return null;
+  }
+
+  let closestSample: MissionEphemerisSample | null = null;
+  let closestAltitudeMiles = Number.POSITIVE_INFINITY;
+
+  for (const sample of ephemeris.samples) {
+    if (sample.timestampMs < ephemeris.flybyTimeMs) {
+      continue;
+    }
+
+    const state = getMissionEphemerisState(sample.timestampMs, ephemeris);
+    if (state && state.altitudeMiles < closestAltitudeMiles) {
+      closestAltitudeMiles = state.altitudeMiles;
+      closestSample = sample;
+    }
+  }
+
+  return closestSample?.timestampMs ?? null;
+}
+
+export function getOrbitMilestoneTimeMs(
+  key: (typeof HERO_MILESTONES)[number]["key"],
+  ephemeris?: MissionEphemeris | null,
+) {
+  const milestone = HERO_MILESTONES.find((entry) => entry.key === key);
+  if (!milestone) {
+    return null;
+  }
+
+  if (key === "flyby" && ephemeris) {
+    return ephemeris.flybyTimeMs;
+  }
+
+  if (key === "reentry" || key === "splashdown") {
+    const officialState = getMissionEphemerisState(milestone.timeMs, ephemeris);
+    if (
+      officialState &&
+      officialState.altitudeMiles > RETURN_EVENT_FALLBACK_ALTITUDE_MILES
+    ) {
+      if (key === "reentry") {
+        return (
+          findFirstReturnSampleAtOrBelowAltitude(
+            REENTRY_MARKER_ALTITUDE_MILES,
+            ephemeris,
+          ) ?? milestone.timeMs
+        );
+      }
+
+      return (
+        findFirstReturnSampleAtOrBelowAltitude(
+          SPLASHDOWN_MARKER_ALTITUDE_MILES,
+          ephemeris,
+        ) ??
+        findClosestReturnSampleTimeMs(ephemeris) ??
+        milestone.timeMs
+      );
+    }
+  }
+
+  return milestone.timeMs;
+}
+
+export function getOrbitMilestonePoint(
+  width: number,
+  height: number,
+  key: (typeof HERO_MILESTONES)[number]["key"],
+  ephemeris?: MissionEphemeris | null,
+) {
+  const milestoneTimeMs = getOrbitMilestoneTimeMs(key, ephemeris);
+  if (milestoneTimeMs === null) {
+    return null;
+  }
+
+  return getMissionMilestonePoint(width, height, milestoneTimeMs, ephemeris);
 }
 
 function transformPoint(

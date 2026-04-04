@@ -21,6 +21,18 @@ const cormorantGaramond = Cormorant_Garamond({
 export const metadata: Metadata = {
   title: "Artemis II — Live Mission Tracker",
   description: "A precision live mission tracker for the Artemis II free-return lunar flyby.",
+  openGraph: {
+    title: "Artemis II — Live Mission Tracker",
+    description:
+      "A precision live mission tracker for the Artemis II free-return lunar flyby.",
+    type: "website",
+  },
+  twitter: {
+    card: "summary_large_image",
+    title: "Artemis II — Live Mission Tracker",
+    description:
+      "A precision live mission tracker for the Artemis II free-return lunar flyby.",
+  },
 };
 
 export default function RootLayout({
