@@ -12,6 +12,8 @@ const MPH_PER_KM_PER_SECOND = 2236.9362920544;
 const RETURN_EVENT_FALLBACK_ALTITUDE_MILES = 5_000;
 const REENTRY_MARKER_ALTITUDE_MILES = 5_000;
 const SPLASHDOWN_MARKER_ALTITUDE_MILES = 100;
+const LUNAR_APPROACH_FOCUS_RADIUS_KM = 220_000;
+const LUNAR_APPROACH_MAX_COMPRESSION = 0.5;
 
 const LAUNCH_MS = LAUNCH.getTime();
 const TLI_MS = TLI.getTime();
@@ -186,6 +188,7 @@ type PhysicalSceneLayout = {
   bottomInset: number;
   earthCenter: Point;
   moonCenter: Point;
+  moonFocusCenter: Point;
   earthRadius: number;
   moonRadius: number;
   moonDistanceLabelText: string;
@@ -428,10 +431,23 @@ export function getTrajectoryProgress(
 export function getTrajectoryTimelineMilestones(
   ephemeris?: MissionEphemeris | null,
 ) {
-  return HERO_MILESTONES.filter((milestone) => milestone.key !== "launch").map((milestone) => ({
-    ...milestone,
-    progress: getTrajectoryProgress(milestone.timeMs, ephemeris),
-  }));
+  const startTimeMs = getDisplayTrajectoryStartTimeMs(ephemeris);
+  const endTimeMs = getDisplayTrajectoryEndTimeMs(ephemeris);
+
+  return HERO_MILESTONES.filter((milestone) => milestone.key !== "launch").map((milestone) => {
+    const resolvedTimeMs =
+      getOrbitMilestoneTimeMs(milestone.key, ephemeris) ?? milestone.timeMs;
+    const timeMs =
+      resolvedTimeMs < startTimeMs || resolvedTimeMs > endTimeMs
+        ? milestone.timeMs
+        : resolvedTimeMs;
+
+    return {
+      ...milestone,
+      timeMs,
+      progress: getTrajectoryProgress(timeMs, ephemeris),
+    };
+  });
 }
 
 function buildProjectedTrajectoryPath(
@@ -581,16 +597,29 @@ export function getTrajectoryPathMilestones(
   height: number,
   ephemeris?: MissionEphemeris | null,
 ) {
-  return HERO_MILESTONES.filter((milestone) => milestone.key !== "launch").map((milestone) => ({
-    ...milestone,
-    progress:
-      milestone.key === "reentry" &&
-      getMissionEphemerisState(milestone.timeMs, ephemeris)?.altitudeMiles !== null &&
-      (getMissionEphemerisState(milestone.timeMs, ephemeris)?.altitudeMiles ?? 0) >
-        RETURN_EVENT_FALLBACK_ALTITUDE_MILES
-        ? milestone.progress
-        : getTrajectoryPathProgress(milestone.timeMs, width, height, ephemeris),
-  }));
+  const startTimeMs = getDisplayTrajectoryStartTimeMs(ephemeris);
+  const endTimeMs = getDisplayTrajectoryEndTimeMs(ephemeris);
+
+  return HERO_MILESTONES.filter((milestone) => milestone.key !== "launch").map((milestone) => {
+    const resolvedTimeMs =
+      getOrbitMilestoneTimeMs(milestone.key, ephemeris) ?? milestone.timeMs;
+    const timeMs =
+      resolvedTimeMs < startTimeMs || resolvedTimeMs > endTimeMs
+        ? milestone.timeMs
+        : resolvedTimeMs;
+    const state = getMissionEphemerisState(timeMs, ephemeris);
+
+    return {
+      ...milestone,
+      timeMs,
+      progress:
+        milestone.key === "reentry" &&
+        state?.altitudeMiles !== null &&
+        (state?.altitudeMiles ?? 0) > RETURN_EVENT_FALLBACK_ALTITUDE_MILES
+          ? milestone.progress
+          : getTrajectoryPathProgress(timeMs, width, height, ephemeris),
+    };
+  });
 }
 
 export function getTrajectoryPathPointAtProgress(
@@ -1306,6 +1335,10 @@ function getPhysicalSceneLayout(
     bottomInset,
     earthCenter,
     moonCenter,
+    moonFocusCenter: {
+      x: flybyMoonState.sceneX,
+      y: flybyMoonState.sceneY,
+    },
     earthRadius,
     moonRadius,
     moonDistanceLabelText: formatMilesFromEarth(ephemeris.moonFlybyDistanceKm * MILES_PER_KM),
@@ -1319,6 +1352,38 @@ function getPhysicalSceneLayout(
   return layout;
 }
 
+function easeInOut(value: number) {
+  return value * value * (3 - 2 * value);
+}
+
+function applyLunarApproachFocus(
+  point: Point,
+  physicalLayout: PhysicalSceneLayout,
+) {
+  const deltaX = point.x - physicalLayout.moonFocusCenter.x;
+  const deltaY = point.y - physicalLayout.moonFocusCenter.y;
+  const distanceToMoonCenterKm = Math.hypot(deltaX, deltaY);
+  const focusProgress = clamp(
+    1 - distanceToMoonCenterKm / LUNAR_APPROACH_FOCUS_RADIUS_KM,
+    0,
+    1,
+  );
+
+  if (focusProgress === 0) {
+    return point;
+  }
+
+  // Tighten the last stretch into the lunar flyby so near-moon states read
+  // closer onscreen without disturbing the broader Earth-to-Moon framing.
+  const compression =
+    LUNAR_APPROACH_MAX_COMPRESSION * easeInOut(focusProgress);
+
+  return {
+    x: physicalLayout.moonFocusCenter.x + deltaX * (1 - compression),
+    y: physicalLayout.moonFocusCenter.y + deltaY * (1 - compression),
+  };
+}
+
 function transformProjectedPoint(
   point: Point,
   width: number,
@@ -1330,11 +1395,15 @@ function transformProjectedPoint(
     return transformReferencePoint(point, width, height);
   }
 
+  const adjustedPoint = applyLunarApproachFocus(point, physicalLayout);
+
   return {
-    x: physicalLayout.offsetX + point.x * physicalLayout.scale,
+    x: physicalLayout.offsetX + adjustedPoint.x * physicalLayout.scale,
     y:
       physicalLayout.offsetY -
-      point.y * physicalLayout.verticalCompression * physicalLayout.scale,
+      adjustedPoint.y *
+        physicalLayout.verticalCompression *
+        physicalLayout.scale,
   };
 }
 

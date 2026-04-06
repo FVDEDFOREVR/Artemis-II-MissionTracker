@@ -5,15 +5,12 @@ import HeroTracker from "@/components/HeroTracker";
 import {
   getMissionSnapshot,
   getMissionTelemetry,
-  getTrajectoryPathMilestones,
-  getTrajectoryPathProgress,
+  getTrajectoryProgress,
+  getTrajectoryTimelineMilestones,
   parseMissionEphemerisPayload,
 } from "@/lib/mission";
 
 export const dynamic = "force-dynamic";
-
-const INITIAL_VIEWPORT_WIDTH = 1440;
-const INITIAL_VIEWPORT_HEIGHT = 900;
 
 export default async function HomePage() {
   const initialNowMs = Date.now();
@@ -36,15 +33,11 @@ export default async function HomePage() {
   }
 
   const initialTelemetry = getMissionTelemetry(initialNowMs, initialMissionEphemeris);
-  const initialTimelineProgress = getTrajectoryPathProgress(
+  const initialTimelineProgress = getTrajectoryProgress(
     initialNowMs,
-    INITIAL_VIEWPORT_WIDTH,
-    INITIAL_VIEWPORT_HEIGHT,
     initialMissionEphemeris,
   );
-  const initialTimelineMilestones = getTrajectoryPathMilestones(
-    INITIAL_VIEWPORT_WIDTH,
-    INITIAL_VIEWPORT_HEIGHT,
+  const initialTimelineMilestones = getTrajectoryTimelineMilestones(
     initialMissionEphemeris,
   );
 
