@@ -17,8 +17,8 @@ import {
   getMissionTraveledPathPoints,
   getOrbitMilestonePoint,
   getPointOnMissionCurve,
-  getTrajectoryPathMilestones,
-  getTrajectoryPathProgress,
+  getTrajectoryProgress,
+  getTrajectoryTimelineMilestones,
   loadMissionEphemeris,
   getTrajectoryGeometry,
   sampleMissionCurve,
@@ -423,7 +423,7 @@ export default function HeroTracker({
   initialSnapshot: ReturnType<typeof getMissionSnapshot>;
   initialTelemetry: MissionTelemetry;
   initialTimelineProgress: number;
-  initialTimelineMilestones: ReturnType<typeof getTrajectoryPathMilestones>;
+  initialTimelineMilestones: ReturnType<typeof getTrajectoryTimelineMilestones>;
 }) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const earthImageRef = useRef<HTMLImageElement | null>(null);
@@ -562,12 +562,7 @@ export default function HeroTracker({
       const timelineProgress =
         ephemeris === undefined
           ? initialTimelineProgress
-          : getTrajectoryPathProgress(
-              now,
-              viewport.width,
-              viewport.height,
-              ephemeris,
-            );
+          : getTrajectoryProgress(now, ephemeris);
       const traveledPath = getMissionTraveledPathPoints(
         now,
         viewport.width,
@@ -652,12 +647,7 @@ export default function HeroTracker({
   const timelineProgress =
     ephemeris === undefined
       ? initialTimelineProgress
-      : getTrajectoryPathProgress(
-          nowMs,
-          viewport.width,
-          viewport.height,
-          resolvedEphemeris,
-        );
+      : getTrajectoryProgress(nowMs, resolvedEphemeris);
   const progressText = formatMissionProgressPercent(timelineProgress);
   const mobile = viewport.width < 768;
   const dataSourceLabel =
@@ -665,11 +655,7 @@ export default function HeroTracker({
   const timelineMilestones =
     ephemeris === undefined
       ? initialTimelineMilestones
-      : getTrajectoryPathMilestones(
-          viewport.width,
-          viewport.height,
-          resolvedEphemeris,
-        );
+      : getTrajectoryTimelineMilestones(resolvedEphemeris);
   const overlayGeometry = getTrajectoryGeometry(
     viewport.width,
     viewport.height,
@@ -952,7 +938,7 @@ export default function HeroTracker({
                   }
                 >
                   <span className="absolute left-0 top-0 text-[10px] font-normal tracking-[1.6px] text-muted">
-                    TRAJECTORY PROGRESS
+                    TRAJECTORY TIMELINE
                   </span>
                   <span
                     ref={mobileProgressPercentRef}
@@ -1050,7 +1036,7 @@ export default function HeroTracker({
                   }}
                 >
                   <span className="absolute left-0 top-0 text-[9px] font-normal tracking-[1.6px] text-muted">
-                    TRAJECTORY PROGRESS
+                    TRAJECTORY TIMELINE
                   </span>
                   <span
                     ref={desktopProgressPercentRef}
